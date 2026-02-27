@@ -45,7 +45,7 @@ def run_bronze(*, source_dbs: list[dict[str, str]], duckdb_path: Path | None = N
 	os.environ.setdefault("DESTINATION__DUCKDB__CREDENTIALS", str(duckdb_path))
 
 	# Keep resource execution conservative by default to reduce memory pressure.
-	# Users can override these via environment variables.
+	# Can override these via environment variables.
 	os.environ.setdefault("DLT__EXTRACT__WORKERS", "1")
 	os.environ.setdefault("DLT__NORMALIZE__WORKERS", "1")
 	os.environ.setdefault("DLT__LOAD__WORKERS", "1")
@@ -57,24 +57,37 @@ def run_bronze(*, source_dbs: list[dict[str, str]], duckdb_path: Path | None = N
 		progress="log",
 	)
 
+	# If previous runs were interrupted/OOM-killed, dlt may have pending extracted/
+	# normalized packages. Loading those can take a long time and spike memory.
+	# Start clean by default. 
+	print("[Bronze] Cleaning pending dlt packages (if any)...")
+	pipeline.drop_pending_packages(with_partial_loads=True)
+	print("[Bronze] Pending package cleanup done")
+
 	source = guarani_multi_source(source_dbs)
 
 	# Run resources one-by-one to avoid large concurrent load jobs.
 	# Optionally filter via `DWH_BRONZE_RESOURCES=students,personas,...`
+	print("[Bronze] Selecting resources...")
 	requested = os.getenv("DWH_BRONZE_RESOURCES", "").strip()
 	if requested:
 		names = [n.strip() for n in requested.split(",") if n.strip()]
+		print(f"[Bronze] Using DWH_BRONZE_RESOURCES: {names}")
 		resources = [getattr(source, n) for n in names]
 	else:
-		resources = list(source)
+		print("[Bronze] Using all resources from source")
+		# NOTE: iterating a dlt Source yields *data items* (dict rows), not resources.
+		# We must explicitly take the source's resource objects.
+		resources = list(source.resources.values())
+	print(f"[Bronze] Will run {len(resources)} resources")
 
 	for res in resources:
 		print(f"[Bronze] Running resource: {res.name}")
 		# Do NOT use pipeline.run here: it calls load() with default workers=20,
 		# which can spike memory and get OOM-killed on large loads.
-		pipeline.extract(res, workers=4, max_parallel_items=8, write_disposition="replace")
-		pipeline.normalize(workers=2)
-		pipeline.load(workers=2)
+		pipeline.extract(res, workers=1, max_parallel_items=1)
+		pipeline.normalize(workers=1)
+		pipeline.load(workers=1)
 		print(f"[Bronze] Done: {res.name}")
 
 
